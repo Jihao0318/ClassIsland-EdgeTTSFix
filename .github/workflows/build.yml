@@ -1,0 +1,105 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*.[0-9]*"
+      - "v[0-9]*.[0-9]*.[0-9]*.[0-9]*"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  PROJECT: EdgeTTSFix/EdgeTTSFix/EdgeTTSFix.csproj
+  CIPX: EdgeTTSFix/EdgeTTSFix/cipx/EdgeTTSFix.cipx
+
+jobs:
+  build:
+    name: Build plugin
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # 打 tag 时要求 tag 与两个清单中的版本一致，避免发布错版本
+      - name: Verify tag version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          foreach ($file in @("EdgeTTSFix/EdgeTTSFix/manifest.yml", "EdgeTTSFix/EdgeTTSFix.yml")) {
+            $match = Select-String -Path $file -Pattern '^version:\s*(.+)$'
+            if (-not $match) {
+              throw "Missing version in $file"
+            }
+            $version = $match.Matches[0].Groups[1].Value.Trim()
+            if ($version -ne $tag) {
+              throw "Tag '$tag' does not match version '$version' in $file."
+            }
+          }
+
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT }}
+
+      - name: Build and package
+        run: dotnet build ${{ env.PROJECT }} -c Release --no-restore -p:CreateCipx=true -p:GenerateHashSummary=false
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path $env:CIPX)) {
+            throw "Package not found: $env:CIPX"
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $env:CIPX))
+          try {
+            $entries = $zip.Entries.FullName
+            foreach ($required in @("manifest.yml", "EdgeTTSFix.dll", "Icon.ico")) {
+              if ($entries -notcontains $required) {
+                throw "Missing $required in package"
+              }
+            }
+          }
+          finally {
+            $zip.Dispose()
+          }
+
+          $hash = (Get-FileHash $env:CIPX -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SHA256: $hash"
+          "SHA256: $hash" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdgeTTSFix-cipx
+          path: ${{ env.CIPX }}
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.CIPX }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
