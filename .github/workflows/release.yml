@@ -22,8 +22,8 @@ concurrency:
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
-  PROJECT: EdgeTTSFix/EdgeTTSFix/EdgeTTSFix.csproj
-  CIPX: EdgeTTSFix/EdgeTTSFix/cipx/EdgeTTSFix.cipx
+  PROJECT: EdgeTTSFix/EdgeTTSFix.csproj
+  CIPX: EdgeTTSFix/cipx/EdgeTTSFix.cipx
 
 jobs:
   release:
@@ -46,7 +46,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag }}".TrimStart('v')
-          foreach ($file in @("EdgeTTSFix/EdgeTTSFix/manifest.yml", "EdgeTTSFix/EdgeTTSFix.yml")) {
+          foreach ($file in @("EdgeTTSFix/manifest.yml", "EdgeTTSFix.yml")) {
             $match = Select-String -Path $file -Pattern '^version:\s*(.+)$'
             if (-not $match) {
               throw "Missing version in $file"
