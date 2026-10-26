@@ -65,7 +65,8 @@ public class EdgeTtsFixSpeechService : ISpeechService
         var playInfo = new EdgeTtsPlayInfo(cachePath, new CancellationTokenSource());
         if (!File.Exists(cachePath))
         {
-            playInfo.DownloadTask = GenerateSpeechAsync(text, settings, cachePath, playInfo.CancellationTokenSource.Token);
+            // 合成任务独立于播放取消：即使队列被清空，也让它完成并写入缓存。
+            playInfo.DownloadTask = GenerateSpeechAsync(text, settings, cachePath);
         }
 
         lock (_queueLock)
@@ -91,7 +92,9 @@ public class EdgeTtsFixSpeechService : ISpeechService
         {
             while (_playingQueue.Count > 0)
             {
-                _playingQueue.Dequeue().CancellationTokenSource.Cancel();
+                var playInfo = _playingQueue.Dequeue();
+                playInfo.CancellationTokenSource.Cancel();
+                playInfo.CancellationTokenSource.Dispose();
             }
         }
     }
@@ -137,9 +140,19 @@ public class EdgeTtsFixSpeechService : ISpeechService
                         var generated = await playInfo.DownloadTask;
                         if (!generated)
                         {
-                            _logger.LogError("语音 {FilePath} 生成失败。", playInfo.FilePath);
+                            if (!playInfo.CancellationTokenSource.IsCancellationRequested)
+                            {
+                                _logger.LogError("语音 {FilePath} 生成失败。", playInfo.FilePath);
+                            }
+
                             continue;
                         }
+                    }
+
+                    // 生成期间可能已经被 ClearSpeechQueue 取消播放。
+                    if (playInfo.CancellationTokenSource.IsCancellationRequested)
+                    {
+                        continue;
                     }
 
                     if (!File.Exists(playInfo.FilePath))
@@ -190,14 +203,13 @@ public class EdgeTtsFixSpeechService : ISpeechService
     private async Task<bool> GenerateSpeechAsync(
         string text,
         EdgeTtsFixSettings settings,
-        string filePath,
-        CancellationToken cancellationToken)
+        string filePath)
     {
         try
         {
             Directory.CreateDirectory(CacheFolderPath);
             var options = new EdgeTtsOptions(settings.Voice, settings.Rate, settings.Volume, settings.Pitch);
-            await _client.SynthesizeToFileAsync(text, options, filePath, cancellationToken);
+            await _client.SynthesizeToFileAsync(text, options, filePath, CancellationToken.None);
             _logger.LogDebug("Edge TTS 语音已保存到：{FilePath}", filePath);
             return true;
         }
@@ -213,12 +225,80 @@ public class EdgeTtsFixSpeechService : ISpeechService
         }
     }
 
+    private const int ReadableNameLength = 24;
+
     private static string GetCachePath(string text, EdgeTtsFixSettings settings)
     {
         var key = string.Join('|', settings.Voice, settings.Rate, settings.Volume, settings.Pitch, text);
-        var hash = Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant();
+        var fullHash = Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant();
         var voiceFolder = SanitizeFolderName(settings.Voice);
-        return Path.Combine(CacheFolderPath, voiceFolder, hash + ".mp3");
+        var directory = Path.Combine(CacheFolderPath, voiceFolder);
+        Directory.CreateDirectory(directory);
+
+        var path = Path.Combine(directory, $"{BuildReadableFileName(text)}_{fullHash[..10]}.mp3");
+
+        // 兼容旧版纯 MD5 文件名：首次访问时改名，避免重新生成。
+        var legacyPath = Path.Combine(directory, fullHash + ".mp3");
+        if (!File.Exists(path) && File.Exists(legacyPath))
+        {
+            try
+            {
+                File.Move(legacyPath, path);
+            }
+            catch
+            {
+                // 迁移失败时按新路径重新生成。
+            }
+        }
+
+        return path;
+    }
+
+    private static string BuildReadableFileName(string text)
+    {
+        var builder = new StringBuilder(ReadableNameLength);
+        var lastWasSpace = false;
+
+        foreach (var rune in text.EnumerateRunes())
+        {
+            if (builder.Length >= ReadableNameLength)
+            {
+                break;
+            }
+
+            if (Rune.IsControl(rune))
+            {
+                continue;
+            }
+
+            if (Rune.IsWhiteSpace(rune))
+            {
+                if (!lastWasSpace && builder.Length > 0)
+                {
+                    builder.Append(' ');
+                    lastWasSpace = true;
+                }
+
+                continue;
+            }
+
+            var value = rune.ToString();
+            if (value.Length == 1 && InvalidFolderChars.Contains(value[0]))
+            {
+                continue;
+            }
+
+            if (builder.Length + value.Length > ReadableNameLength)
+            {
+                break;
+            }
+
+            builder.Append(value);
+            lastWasSpace = false;
+        }
+
+        var name = builder.ToString().Trim().TrimEnd('.');
+        return name.Length == 0 ? "speech" : name;
     }
 
     private static string SanitizeFolderName(string value)

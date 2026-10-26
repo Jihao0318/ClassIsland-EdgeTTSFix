@@ -48,7 +48,9 @@
 | 音调 | Hz，例如 `-20Hz`、`+20Hz` |
 | 缓存 | 缓存目录展示与一键清空 |
 
-缓存位置：`<ClassIsland 数据目录>/Config/Plugins/EdgeTTSFix/EdgeTtsCache/<音色>/<md5>.mp3`
+缓存位置：`<ClassIsland 数据目录>/Config/Plugins/EdgeTTSFix/EdgeTtsCache/<音色>/<文本前 24 字>_<短哈希>.mp3`
+
+同一文本修改语速、音量或音调时会生成独立缓存，因为音频内容不同。
 
 ## 构建
 
